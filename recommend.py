@@ -22,12 +22,17 @@ MODEL = "gpt-4o-mini"
 FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 
 # 1차 추천 JSON 의 필수 키와 타입 — 검증의 기준이 되는 단일 출처.
+# 필수 스키마(미션 요구) — 1차 추천 JSON 은 이 4개 키를 반드시 가진다.
 REQUIRED_KEYS = {
-    "recommended_cities": list,  # 보너스 1 — 도시 1개가 아니라 2~3개(배열)
+    "recommended_city": str,  # 대표 도시 1개 — 미션 필수 필드
     "weather": str,
     "events": list,
     "reason": str,
 }
+# 보너스 1 — 대표 도시 **외에** 후보를 배열로 더 받는다.
+# 필수 필드를 배열로 **바꾸지 않고 나란히 둔다**: 보너스는 확장이지 대체가 아니다.
+# recommended_city 만 읽는 소비자(기존 코드·다른 미션)가 그대로 동작해야 한다.
+CITIES_KEY = "recommended_cities"
 MIN_CITIES = 2
 MAX_CITIES = 3
 
@@ -41,15 +46,16 @@ def build_prompt(date, retry=False):
     if retry:
         return (
             f"{date} 여행지 추천. 아래 4개 키만 담은 JSON 하나만 출력하라. 설명·코드펜스 금지.\n"
-            '{"recommended_cities": ["도시1", "도시2"], "weather": "날씨 요약", '
-            '"events": ["행사1"], "reason": "추천 근거"}'
+            '{"recommended_city": "대표도시", "recommended_cities": ["대표도시", "도시2"], '
+            '"weather": "날씨 요약", "events": ["행사1"], "reason": "추천 근거"}'
         )
     return f"""당신은 국내 여행 플래너다. 여행 날짜는 {date} 이다.
 
 이 시기에 가기 좋은 국내 여행지 2~3곳을 추천하고, 결과를 **JSON 하나로만** 출력하라.
 
-[출력 형식 — 이 4개 키를 반드시 포함]
-- "recommended_cities": 문자열 배열. 도시/지역 이름 2~3개 (예: ["제주", "강릉"])
+[출력 형식 — 이 5개 키를 반드시 포함]
+- "recommended_city": 문자열. **대표** 도시 이름 하나 (예: "강릉")
+- "recommended_cities": 문자열 배열. 대표 도시를 **첫 번째**로 포함한 2~3개 (예: ["강릉", "속초"])
 - "weather": 문자열. 그 시기의 일반적인 날씨 요약
 - "events": 문자열 배열. 그 시기 행사·축제 후보 1~3개
 - "reason": 문자열. 추천 근거 2~4문장 (왜 이 지역들인지)
@@ -107,11 +113,16 @@ def parse_recommendation(text):
         if not isinstance(data[key], expected):
             raise ValueError(f"{key} 타입 불일치(기대 {expected.__name__})")
     data["events"] = [str(e) for e in data["events"]]
-    # 도시 목록 정규화 — 문자열로 통일하고 개수를 MIN~MAX 로 맞춘다.
-    cities = [str(c).strip() for c in data["recommended_cities"] if str(c).strip()]
-    if len(cities) < MIN_CITIES:
-        raise ValueError(f"recommended_cities 가 {len(cities)}개 — 최소 {MIN_CITIES}개 필요")
-    data["recommended_cities"] = cities[:MAX_CITIES]
+    data["recommended_city"] = data["recommended_city"].strip()
+    if not data["recommended_city"]:
+        raise ValueError("recommended_city 가 빈 문자열")
+
+    # 보너스 목록 정규화 — 없거나 부족하면 대표 도시 하나로 채운다(필수 동작은 유지된다).
+    raw_cities = data.get(CITIES_KEY) or []
+    cities = [str(c).strip() for c in raw_cities if str(c).strip()]
+    if data["recommended_city"] not in cities:
+        cities.insert(0, data["recommended_city"])  # 대표 도시는 항상 목록의 첫 번째
+    data[CITIES_KEY] = cities[:MAX_CITIES]
     return data
 
 

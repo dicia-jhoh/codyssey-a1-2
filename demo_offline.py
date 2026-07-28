@@ -16,6 +16,7 @@ import config
 import report
 
 SAMPLE_RECOMMENDATION = {
+    "recommended_city": "강릉",
     "recommended_cities": ["강릉", "속초"],
     "weather": "9월 중순 강릉은 낮 23~26도로 선선하고 습도가 낮아 해안 산책에 좋습니다.",
     "events": ["강릉커피축제(가을 시즌)", "정동진 해변 야간 조명"],

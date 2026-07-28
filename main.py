@@ -121,8 +121,9 @@ def run(argv=None):
             for message in errors:
                 print(f"  - {message}", file=sys.stderr)
             return 1
-        cities = recommendation["recommended_cities"]
-        print(f"      추천: {', '.join(cities)}", file=sys.stderr)
+        main_city = recommendation["recommended_city"]  # 필수 필드 — 대표 도시
+        cities = recommendation.get("recommended_cities") or [main_city]  # 보너스 — 후보 목록
+        print(f"      추천: {main_city} (후보 {', '.join(cities)})", file=sys.stderr)
 
         # ⑤ 2단계 — 지역마다 맛집 검색(보너스 1: 반복 처리).
         # 한 지역이 실패해도 나머지는 계속 돈다 — 부분 실패로 전체를 버리지 않는다.

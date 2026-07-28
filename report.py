@@ -15,13 +15,16 @@ def build_report(date, recommendation, restaurants, errors):
 
     순수 함수로 둔 이유: 입력만 주면 결과가 정해지므로 API 없이도 테스트할 수 있다.
     """
-    cities = recommendation.get("recommended_cities") or ["미상"]
+    main_city = recommendation.get("recommended_city") or "미상"
+    # 보너스 목록이 없으면 대표 도시 하나로만 구성한다 — 필수 동작이 보너스에 의존하지 않는다.
+    cities = recommendation.get("recommended_cities") or [main_city]
     lines = [
-        f"# {date} 여행 리포트 — {' · '.join(cities)}",
+        f"# {date} 여행 리포트 — {main_city}"
+        + (f" (후보 {' · '.join(cities)})" if len(cities) > 1 else ""),
         "",
         "## 추천 지역과 이유",
         "",
-        "".join(f"**{c}**  " for c in cities),
+        f"**{main_city}**" + (f" — 후보: {' · '.join(cities[1:])}" if len(cities) > 1 else ""),
         "",
         recommendation.get("reason", "(추천 근거 없음)"),
         "",
@@ -41,7 +44,8 @@ def build_report(date, recommendation, restaurants, errors):
     lines += ["", "## 맛집 (지역별)", ""]
     for city in cities:
         found = restaurants.get(city) or []
-        lines += [f"### {city}", ""]
+        label = f"{city} (대표)" if city == main_city else city
+        lines += [f"### {label}", ""]
         if found:
             lines.append("| 이름 | 주소 | 분류 | 링크 |")
             lines.append("|---|---|---|---|")

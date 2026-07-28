@@ -8,8 +8,10 @@ LLM 이 여행지를 추천하고 → 그 도시의 맛집을 지도 API 로 찾
 ```
 [사용자] -date 2026-09-15
     ↓
-[1단계] LLM API ─────→ {"recommended_cities": ["강릉", "속초"], "weather": …, "events": […], "reason": …}
-    ↓ 도시 목록을 반복문으로 전달
+[1단계] LLM API ─────→ {"recommended_city": "강릉",                    ← 필수: 대표 도시 1개
+                        "recommended_cities": ["강릉", "속초"],       ← 보너스: 후보 목록
+                        "weather": …, "events": […], "reason": …}
+    ↓ 대표 도시(+후보 목록)를 반복문으로 전달
 [2단계] 지도 API ────→ {"강릉": [{"name": "초당순두부마을", …}, …], "속초": [ … ]}  (지역별, 0건 가능)
     ↓ 둘 다 전달
 [3단계] 리포트 생성 ──→ results/2026-09-15.md  +  results/2026-09-15.json
@@ -151,11 +153,15 @@ results/           산출물 저장 위치 (gitignore — 실행하면 생깁니
 
 ```python
 # 1단계가 돌려준 것 (dict)
-{"recommended_cities": ["강릉", "속초"], "weather": "...", "events": [...], "reason": "..."}
+{"recommended_city": "강릉",                  # 필수 — 대표 도시
+ "recommended_cities": ["강릉", "속초"],       # 보너스 — 후보 목록(대표가 첫 번째)
+ "weather": "...", "events": [...], "reason": "..."}
 
-# 2단계는 그 배열을 반복문으로 이어받는다
+# 2단계는 대표 도시를 기본으로, 목록이 있으면 반복해서 이어받는다
+main_city = recommendation["recommended_city"]
+cities = recommendation.get("recommended_cities") or [main_city]
 restaurants = {}
-for city in recommendation["recommended_cities"]:
+for city in cities:
     restaurants[city] = places.find_restaurants(map_key, city, errors, size=args.size)
 ```
 
@@ -352,8 +358,13 @@ $ python main.py -date 2026-09-15     # 두 번째 실행
 경우가 흔한데, 그때마다 LLM 과 지도 API 를 부를 이유가 없습니다. 이것이 "외부 API 비용·속도
 최적화"의 가장 기본적인 형태입니다.
 
-**보너스 1 — 복수 지역 추천**: 1단계가 도시를 **2~3개** 추천하고, 2단계가 지역마다 맛집을 찾고,
-리포트가 지역별 섹션으로 정리합니다.
+**보너스 1 — 복수 지역 추천**: 1단계가 대표 도시 외에 후보를 **2~3개** 함께 추천하고,
+2단계가 지역마다 맛집을 찾고, 리포트가 지역별 섹션으로 정리합니다.
+
+**필수 필드를 배열로 바꾸지 않고 나란히 둔 이유**: 미션 필수 스키마는 `recommended_city`(단수)입니다.
+그걸 배열로 교체하면 보너스를 켜는 순간 필수 요구가 깨집니다. 그래서 `recommended_city`(대표 1개)는
+그대로 두고 `recommended_cities`(후보 목록)를 **추가**했습니다 — 목록이 없어도 대표 도시 하나로
+정상 동작합니다. **보너스는 확장이지 대체가 아닙니다.**
 
 ```
 [1/3] 2026-09-15 여행지 추천 요청 중...
@@ -363,7 +374,7 @@ $ python main.py -date 2026-09-15     # 두 번째 실행
       속초: 5곳
 ```
 
-- **반복 처리**: `for city in cities:` 로 2단계를 돌립니다. 한 지역이 실패해도 `continue` 없이
+- **반복 처리**: `for city in cities:` 로 2단계를 돌립니다(목록의 첫 번째가 대표 도시). 한 지역이 실패해도 `continue` 없이
   다음 지역이 계속 돕니다 — 실패한 지역만 "데이터 없음"이 되고 나머지는 정상 출력됩니다.
 - **결과 구조 설계**: 맛집을 평평한 리스트가 아니라 **`{도시: [아이템…]}` 딕셔너리**로 담습니다.
   리스트로 하면 "이 가게가 어느 도시 것인지"를 항목마다 다시 표시해야 하고, 지역별로 나눠 출력할 때
