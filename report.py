@@ -15,13 +15,13 @@ def build_report(date, recommendation, restaurants, errors):
 
     순수 함수로 둔 이유: 입력만 주면 결과가 정해지므로 API 없이도 테스트할 수 있다.
     """
-    city = recommendation.get("recommended_city", "미상")
+    cities = recommendation.get("recommended_cities") or ["미상"]
     lines = [
-        f"# {date} 여행 리포트 — {city}",
+        f"# {date} 여행 리포트 — {' · '.join(cities)}",
         "",
         "## 추천 지역과 이유",
         "",
-        f"**{city}**",
+        "".join(f"**{c}**  " for c in cities),
         "",
         recommendation.get("reason", "(추천 근거 없음)"),
         "",
@@ -38,25 +38,31 @@ def build_report(date, recommendation, restaurants, errors):
         lines += [f"- {event}" for event in events]
     else:
         lines.append("- 데이터 없음")
-    lines += ["", "## 맛집", ""]
+    lines += ["", "## 맛집 (지역별)", ""]
+    for city in cities:
+        found = restaurants.get(city) or []
+        lines += [f"### {city}", ""]
+        if found:
+            lines.append("| 이름 | 주소 | 분류 | 링크 |")
+            lines.append("|---|---|---|---|")
+            for place in found:
+                url = place.get("url") or ""
+                link = f"[지도]({url})" if url else "-"
+                lines.append(
+                    f"| {place.get('name', '')} | {place.get('address', '')} "
+                    f"| {_short_category(place.get('category', ''))} | {link} |"
+                )
+        else:
+            lines.append("데이터 없음 (검색 결과가 없거나 API 호출에 실패했습니다)")
+        lines.append("")
 
-    if restaurants:
-        lines.append("| 이름 | 주소 | 분류 | 링크 |")
-        lines.append("|---|---|---|---|")
-        for place in restaurants:
-            url = place.get("url") or ""
-            link = f"[지도]({url})" if url else "-"
-            lines.append(
-                f"| {place.get('name', '')} | {place.get('address', '')} "
-                f"| {_short_category(place.get('category', ''))} | {link} |"
-            )
-    else:
-        lines.append("데이터 없음 (검색 결과가 없거나 API 호출에 실패했습니다)")
+    lines += ["## 1일 일정 제안 (지역별)", ""]
+    for city in cities:
+        lines.append(f"### {city}")
+        lines += _build_schedule(city, restaurants.get(city) or [])
+        lines.append("")
 
-    lines += ["", "## 1일 일정 제안", ""]
-    lines += _build_schedule(city, restaurants)
-
-    lines += ["", "## errors", ""]
+    lines += ["## errors", ""]
     if errors:
         lines += [f"- {message}" for message in errors]
     else:

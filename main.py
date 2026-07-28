@@ -4,7 +4,7 @@
 
 3단 파이프라인을 순서대로 돌린다:
   1) LLM 이 여행지를 추천한다 → JSON
-  2) 그 도시로 지도 API 에서 맛집을 찾는다 → 리스트(0건 가능)
+  2) 추천된 지역마다 지도 API 로 맛집을 찾는다 → {도시: [아이템…]} (0건 가능)
   3) 둘을 합쳐 Markdown 리포트를 만든다 → results/ 에 저장
 
 각 단계는 별도 파일(recommend.py · places.py · report.py)에 있고, 이 파일은 **순서와 흐름만**
@@ -99,7 +99,7 @@ def run(argv=None):
     if cached:
         print(f"[캐시] {args.date} 저장 결과를 재사용합니다(API 호출 없음).", file=sys.stderr)
         recommendation = cached.get("recommendation") or {}
-        restaurants = cached.get("restaurants") or []
+        restaurants = cached.get("restaurants") or {}
         errors = list(cached.get("errors") or [])
     else:
         # ③ 키 확인 — 없으면 즉시 종료하고 설정 방법을 안내
@@ -121,13 +121,17 @@ def run(argv=None):
             for message in errors:
                 print(f"  - {message}", file=sys.stderr)
             return 1
-        city = recommendation["recommended_city"]
-        print(f"      추천: {city}", file=sys.stderr)
+        cities = recommendation["recommended_cities"]
+        print(f"      추천: {', '.join(cities)}", file=sys.stderr)
 
-        # ⑤ 2단계 — 맛집 검색(실패해도 계속)
-        print(f"[2/3] {city} 맛집 검색 중...", file=sys.stderr)
-        restaurants = places.find_restaurants(map_key, city, errors, size=args.size)
-        print(f"      {len(restaurants)}곳 확보", file=sys.stderr)
+        # ⑤ 2단계 — 지역마다 맛집 검색(보너스 1: 반복 처리).
+        # 한 지역이 실패해도 나머지는 계속 돈다 — 부분 실패로 전체를 버리지 않는다.
+        print(f"[2/3] {len(cities)}개 지역 맛집 검색 중...", file=sys.stderr)
+        restaurants = {}
+        for city in cities:
+            found = places.find_restaurants(map_key, city, errors, size=args.size)
+            restaurants[city] = found
+            print(f"      {city}: {len(found)}곳", file=sys.stderr)
 
     # ⑥ 3단계 — 리포트 생성·저장
     print("[3/3] 리포트 생성 중...", file=sys.stderr)

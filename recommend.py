@@ -23,11 +23,13 @@ FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 
 # 1차 추천 JSON 의 필수 키와 타입 — 검증의 기준이 되는 단일 출처.
 REQUIRED_KEYS = {
-    "recommended_city": str,
+    "recommended_cities": list,  # 보너스 1 — 도시 1개가 아니라 2~3개(배열)
     "weather": str,
     "events": list,
     "reason": str,
 }
+MIN_CITIES = 2
+MAX_CITIES = 3
 
 
 def build_prompt(date, retry=False):
@@ -39,18 +41,18 @@ def build_prompt(date, retry=False):
     if retry:
         return (
             f"{date} 여행지 추천. 아래 4개 키만 담은 JSON 하나만 출력하라. 설명·코드펜스 금지.\n"
-            '{"recommended_city": "도시명", "weather": "날씨 요약", '
+            '{"recommended_cities": ["도시1", "도시2"], "weather": "날씨 요약", '
             '"events": ["행사1"], "reason": "추천 근거"}'
         )
     return f"""당신은 국내 여행 플래너다. 여행 날짜는 {date} 이다.
 
-이 시기에 가기 좋은 국내 여행지 한 곳을 추천하고, 결과를 **JSON 하나로만** 출력하라.
+이 시기에 가기 좋은 국내 여행지 2~3곳을 추천하고, 결과를 **JSON 하나로만** 출력하라.
 
 [출력 형식 — 이 4개 키를 반드시 포함]
-- "recommended_city": 문자열. 도시/지역 이름 하나 (예: "제주", "강릉")
+- "recommended_cities": 문자열 배열. 도시/지역 이름 2~3개 (예: ["제주", "강릉"])
 - "weather": 문자열. 그 시기의 일반적인 날씨 요약
 - "events": 문자열 배열. 그 시기 행사·축제 후보 1~3개
-- "reason": 문자열. 추천 근거 2~4문장
+- "reason": 문자열. 추천 근거 2~4문장 (왜 이 지역들인지)
 
 [규칙]
 - JSON 외의 설명·인사말·코드펜스를 붙이지 마라.
@@ -105,6 +107,11 @@ def parse_recommendation(text):
         if not isinstance(data[key], expected):
             raise ValueError(f"{key} 타입 불일치(기대 {expected.__name__})")
     data["events"] = [str(e) for e in data["events"]]
+    # 도시 목록 정규화 — 문자열로 통일하고 개수를 MIN~MAX 로 맞춘다.
+    cities = [str(c).strip() for c in data["recommended_cities"] if str(c).strip()]
+    if len(cities) < MIN_CITIES:
+        raise ValueError(f"recommended_cities 가 {len(cities)}개 — 최소 {MIN_CITIES}개 필요")
+    data["recommended_cities"] = cities[:MAX_CITIES]
     return data
 
 
