@@ -18,6 +18,26 @@ import urllib.request
 KAKAO_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 DEFAULT_SIZE = 5  # 권장 5곳
 
+# LLM 이 돌려주는 지명 표기 흔들림을 지도 검색이 아는 형태로 맞춘다.
+# 예: "제주도"는 Kakao 키워드 검색에서 결과가 얕고, "제주시"가 잘 걸린다.
+CITY_ALIASES = {
+    "제주도": "제주시",
+    "울릉도": "울릉군",
+    "여수시": "여수",
+    "강원도 강릉": "강릉",
+}
+
+
+def normalize_city(city):
+    """검색 전 도시명 보정 — 공백 정리 + 별칭 치환.
+
+    왜 필요한가: 1단계 LLM 은 "제주도"·"강원도 강릉" 처럼 사람이 쓰는 표기를 준다.
+    지도 API 는 행정구역 단위 표기에 더 잘 맞는다. 보정을 **2단계 입구 한 곳**에 두면
+    LLM 프롬프트를 건드리지 않고도 검색 품질을 올릴 수 있다.
+    """
+    cleaned = " ".join(str(city).split())
+    return CITY_ALIASES.get(cleaned, cleaned)
+
 
 def search_places(api_key, city, size=DEFAULT_SIZE, timeout=30):
     """도시명으로 맛집 검색 → 아이템 리스트. 호출 실패는 예외로 올린다(호출자가 처리).
@@ -27,7 +47,7 @@ def search_places(api_key, city, size=DEFAULT_SIZE, timeout=30):
      POST 는 "보내기", 본문에 데이터를 담아 길거나 민감한 값에 쓴다.)
     인증은 `Authorization: KakaoAK <키>` 헤더. 401/403 이면 키 값·헤더 이름·도메인 설정을 점검한다.
     """
-    query = urllib.parse.urlencode({"query": f"{city} 맛집", "size": size})
+    query = urllib.parse.urlencode({"query": f"{normalize_city(city)} 맛집", "size": size})
     request = urllib.request.Request(
         f"{KAKAO_URL}?{query}",
         headers={"Authorization": f"KakaoAK {api_key}"},
@@ -73,13 +93,14 @@ def find_restaurants(api_key, city, errors, size=DEFAULT_SIZE, timeout=30):
     try:
         items = search_places(api_key, city, size=size, timeout=timeout)
     except urllib.error.HTTPError as exc:
-        errors.append(f"지도 API HTTP {exc.code}: {_hint(exc.code)}")
+        # 어느 도시에서 실패했는지 남긴다 — 여러 지역을 도는 보너스에서 원인 추적이 갈린다.
+        errors.append(f"'{city}' 지도 API HTTP {exc.code}: {_hint(exc.code)}")
         return []
     except urllib.error.URLError as exc:
-        errors.append(f"지도 API 네트워크 오류: {exc.reason}")
+        errors.append(f"'{city}' 지도 API 네트워크 오류: {exc.reason}")
         return []
     except (json.JSONDecodeError, KeyError) as exc:
-        errors.append(f"지도 API 응답 파싱 실패: {exc}")
+        errors.append(f"'{city}' 지도 API 응답 파싱 실패: {exc}")
         return []
     if not items:
         errors.append(f"'{city}' 맛집 검색 결과 0건")
