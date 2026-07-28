@@ -401,6 +401,378 @@ $ python main.py -date 2026-09-15     # 두 번째 실행
 
 ---
 
+## 코드 근거 — 어느 파일의 어느 부분이 무엇을 하나
+
+아래는 이 저장소에 실제로 들어 있는 코드입니다. 설명만으로는 "정말 그렇게 짰는지" 알 수 없으므로,
+평가·학습에 필요한 부분을 **원문 그대로** 옮겨 둡니다. 전체 코드는 각 `.py` 파일에 있습니다.
+
+### 1. `-date` 옵션과 날짜 형식 검증 (`main.py`)
+
+```python
+def parse_date(text):
+    """'YYYY-MM-DD' 문자열을 검증한다. 형식이 틀리면 ValueError."""
+    return dt.datetime.strptime(text, "%Y-%m-%d").date()
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="main.py",
+        description="날짜를 주면 여행지를 추천받아 맛집까지 찾아 리포트를 만듭니다.",
+        epilog='예) python main.py -date "2026-09-15"',
+    )
+    parser.add_argument("-date", required=True, help='여행 날짜 "YYYY-MM-DD"')
+    parser.add_argument("--size", type=int, default=places.DEFAULT_SIZE, help="맛집 개수(기본 5)")
+    parser.add_argument("--no-cache", action="store_true", help="저장 결과를 무시하고 다시 호출")
+    return parser
+```
+
+형식이 틀리면 **파이프라인을 시작하지 않고** 사용법을 띄운 뒤 종료 코드 1 로 끝냅니다.
+
+```python
+    try:
+        parse_date(args.date)
+    except ValueError:
+        print(f"[중단] 날짜 형식이 올바르지 않습니다: {args.date!r}", file=sys.stderr)
+        build_parser().print_help(sys.stderr)
+        return 1
+```
+
+`strptime` 을 쓴 이유: 정규식은 `2026-02-30` 처럼 "형식은 맞지만 존재하지 않는 날짜"를 통과시킵니다.
+
+### 2. 1차 LLM 응답의 JSON 파싱과 필수 키 검증 (`recommend.py`)
+
+```python
+REQUIRED_KEYS = {
+    "recommended_city": str,  # 대표 도시 1개 — 미션 필수 필드
+    "weather": str,
+    "events": list,
+    "reason": str,
+}
+
+
+def parse_recommendation(text):
+    cleaned = FENCE.sub("", text.strip())
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 파싱 실패: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("최상위가 객체(dict)가 아님")
+    for key, expected in REQUIRED_KEYS.items():
+        if key not in data:
+            raise ValueError(f"필수 키 누락: {key}")
+        if not isinstance(data[key], expected):
+            raise ValueError(f"{key} 타입 불일치(기대 {expected.__name__})")
+```
+
+검증을 **키 존재 + 타입** 두 겹으로 둔 이유: `{"recommended_city": 123}` 같은 응답이 통과하면
+2단계에서 엉뚱한 검색어로 API 를 부르고, 원인이 2단계에 있는 것처럼 보입니다.
+`FENCE` 는 LLM 이 자주 붙이는 ` ```json ` 코드펜스를 벗기는 정규식입니다.
+
+### 3. 1차 결과를 2단계 입력으로 넘기는 연결 (`main.py`)
+
+```python
+        main_city = recommendation["recommended_city"]  # 필수 필드 — 대표 도시
+        cities = recommendation.get("recommended_cities") or [main_city]  # 보너스 — 후보 목록
+        print(f"      추천: {main_city} (후보 {', '.join(cities)})", file=sys.stderr)
+
+        print(f"[2/3] {len(cities)}개 지역 맛집 검색 중...", file=sys.stderr)
+        restaurants = {}
+        for city in cities:
+            found = places.find_restaurants(map_key, city, errors, size=args.size)
+            restaurants[city] = found
+```
+
+JSON 으로 받았기 때문에 `recommendation["recommended_city"]` **한 줄**로 이어집니다.
+줄글로 받았다면 문장에서 지명을 잘라내는 코드가 필요하고, LLM 이 표현을 바꿀 때마다 깨집니다.
+
+### 4. `results/` 저장 — 원본 JSON + 리포트 (`main.py`)
+
+```python
+def save_results(date_text, data, report_text):
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    json_path = os.path.join(config.RESULTS_DIR, f"{date_text}.json")
+    md_path = os.path.join(config.RESULTS_DIR, f"{date_text}.md")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(report_text)
+    return json_path, md_path
+```
+
+원본 JSON 을 같이 남기는 이유: 리포트 형식을 바꿔 다시 뽑을 때 API 를 다시 부르지 않아도 됩니다
+(이 파일이 곧 보너스 2의 캐시입니다).
+
+### 5. API 키를 코드에 두지 않는다 (`config.py`)
+
+```python
+# 이 프로그램이 쓰는 환경변수 이름들. 값이 아니라 **이름만** 코드에 있다.
+LLM_KEY_NAME = "OPENAI_API_KEY"  # LLM(1단계) — OpenAI 계열
+MAP_KEY_NAME = "KAKAO_REST_API_KEY"  # 지도/장소 검색(2단계) — Kakao Local
+
+
+def get_key(name):
+    """환경변수에서 키를 읽는다. 없으면 None(호출한 쪽이 안내 후 종료)."""
+    value = os.environ.get(name, "").strip()
+    return value or None
+```
+
+저장소 전체에서 키 **값**이 등장하는 곳은 없습니다. 안내문에도 `YOUR_KEY` 자리표시자만 씁니다.
+
+### 6. 흐름을 함수·모듈로 나눈 방식 (`main.py` 가 순서만 담당)
+
+```python
+import config
+import places
+import recommend
+import report
+```
+
+`main.py` 에는 HTTP 호출도, 문자열 조립도 없습니다. 세 단계를 **부르는 순서**와
+"어디서 멈출지"만 있습니다. 그래서 실패했을 때 `main.py` 하나만 읽어도 어느 단계인지 보입니다.
+
+| 파일 | 책임 | 밖으로 내보내는 것 |
+|---|---|---|
+| `config.py` | 키·경로 | `get_key` · `load_dotenv` · `missing_key_message` |
+| `recommend.py` | 1단계 LLM | `recommend()` → dict 또는 None |
+| `places.py` | 2단계 지도 | `find_restaurants()` → list(실패해도 빈 리스트) |
+| `report.py` | 3단계 문서 | `build_report()` → str (순수 함수) |
+| `main.py` | 순서·입출력 | 종료 코드 |
+
+### 7·8. 지도 API 제공자를 바꿔도 리포트가 안 깨지는 이유 (`places.py`)
+
+```python
+def _to_item(doc):
+    return {
+        "name": doc.get("place_name", ""),
+        "address": doc.get("road_address_name") or doc.get("address_name", ""),
+        "category": doc.get("category_name", ""),
+        "url": doc.get("place_url", ""),
+        "lng": _to_float(doc.get("x")),  # x = 경도
+        "lat": _to_float(doc.get("y")),  # y = 위도
+    }
+```
+
+Kakao 응답 필드명(`place_name`·`x`·`y`)이 리포트까지 새지 않도록 **입구에서 한 번 옮깁니다**.
+Naver Local 로 바꾸면 고칠 곳은 `search_places` 와 이 함수 두 개뿐이고, `report.py` 는 그대로입니다.
+좌표는 Kakao 가 `x`=경도, `y`=위도로 주므로 뒤바꾸면 지도에 엉뚱한 곳이 찍힙니다.
+
+### 9. 오류를 모아 리포트에 남기는 방식 (`places.py` · `report.py`)
+
+```python
+def find_restaurants(api_key, city, errors, size=DEFAULT_SIZE, timeout=30):
+    try:
+        items = search_places(api_key, city, size=size, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        errors.append(f"'{city}' 지도 API HTTP {exc.code}: {_hint(exc.code)}")
+        return []
+    except urllib.error.URLError as exc:
+        errors.append(f"'{city}' 지도 API 네트워크 오류: {exc.reason}")
+        return []
+    except (json.JSONDecodeError, KeyError) as exc:
+        errors.append(f"'{city}' 지도 API 응답 파싱 실패: {exc}")
+        return []
+    if not items:
+        errors.append(f"'{city}' 맛집 검색 결과 0건")
+    return items
+```
+
+각 단계는 예외를 **자기 자리에서** 문장으로 바꿔 `errors` 리스트에 넣고, 리포트가 마지막에 모아
+보여줍니다. 화면에 흘려보내지 않는 이유: 산출물(`.md`)만 받은 사람도 무엇이 빠졌는지 알아야 합니다.
+
+```python
+    lines += ["## errors", ""]
+    if errors:
+        lines += [f"- {message}" for message in errors]
+    else:
+        lines.append("- 없음")
+```
+
+### 10. GET 과 POST 를 각각 어디에 썼나
+
+```python
+# places.py — 조회이므로 GET, 조건은 쿼리스트링에
+    query = urllib.parse.urlencode({"query": f"{normalize_city(city)} 맛집", "size": size})
+    request = urllib.request.Request(
+        f"{KAKAO_URL}?{query}",
+        headers={"Authorization": f"KakaoAK {api_key}"},
+        method="GET",
+    )
+```
+
+```python
+# recommend.py — 긴 프롬프트를 보내야 하므로 POST, 본문은 JSON
+    request = urllib.request.Request(
+        OPENAI_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+```
+
+인증 헤더 형식도 서비스마다 다릅니다 — Kakao 는 `KakaoAK <키>`, OpenAI 는 `Bearer <키>`.
+둘 다 **헤더**에 넣고 URL 에는 넣지 않습니다(URL 은 접속 기록·로그에 그대로 남습니다).
+
+### 11. 1차 프롬프트 설계 (`recommend.py`)
+
+```python
+    return f"""당신은 국내 여행 플래너다. 여행 날짜는 {date} 이다.
+
+이 시기에 가기 좋은 국내 여행지 2~3곳을 추천하고, 결과를 **JSON 하나로만** 출력하라.
+
+[출력 형식 — 이 5개 키를 반드시 포함]
+- "recommended_city": 문자열. **대표** 도시 이름 하나 (예: "강릉")
+- "recommended_cities": 문자열 배열. 대표 도시를 **첫 번째**로 포함한 2~3개
+- "weather": 문자열. 그 시기의 일반적인 날씨 요약
+- "events": 문자열 배열. 그 시기 행사·축제 후보 1~3개
+- "reason": 문자열. 추천 근거 2~4문장 (왜 이 지역들인지)
+
+[규칙]
+- JSON 외의 설명·인사말·코드펜스를 붙이지 마라.
+- 지명은 지도 검색이 가능한 실제 지명으로 쓴다.
+"""
+```
+
+키 이름·타입·개수를 예시와 함께 못 박습니다. "지도 검색이 가능한 실제 지명" 이라는 한 줄이
+2단계 실패를 크게 줄입니다 — 프롬프트가 **다음 단계의 제약**을 알고 있어야 합니다.
+
+### 12. 401 / 403 이 떴을 때 무엇을 점검하나 (`recommend.py` · `places.py`)
+
+```python
+def _http_hint(code):
+    hints = {
+        401: "인증 실패. API 키 값·헤더 이름을 확인하세요",
+        403: "권한 없음. 키의 사용 권한·결제 상태를 확인하세요",
+        429: "요청 한도(쿼터) 초과. 잠시 후 재시도하거나 플랜을 확인하세요",
+        500: "서버 오류. 잠시 후 재시도하세요",
+    }
+    return hints.get(code, "응답 코드를 확인하세요")
+```
+
+점검 순서는 **좁은 것부터**입니다: ① 키 값에 공백·따옴표가 섞였는가 → ② 헤더 이름·접두사가
+맞는가(`Bearer` ‖ `KakaoAK`) → ③ 콘솔에서 그 키의 사용 권한·플랫폼 등록 → ④ 결제·쿼터 상태.
+401 은 대개 ①②, 403 은 ③④ 입니다. 그래서 재시도 루프에서 이 둘은 **즉시 포기**합니다.
+
+```python
+            if exc.code in (401, 403):
+                break  # 키 문제는 재시도해도 같다 — 즉시 포기
+```
+
+### 13. 환경변수 우선순위 (`config.py`)
+
+```python
+def load_dotenv(path=".env"):
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+```
+
+`if key not in os.environ` 한 줄이 우선순위를 정합니다 — **터미널에서 준 값이 `.env` 를 이깁니다.**
+배포 환경에서 파일보다 환경변수가 우선인 관례와 같고, 임시로 다른 키를 써 볼 때 파일을 고치지
+않아도 됩니다. 외부 라이브러리(python-dotenv) 없이 표준 라이브러리만으로 구현했습니다.
+
+### 14. 재시도 전략 — 왜 1회이고, 두 번째는 무엇이 다른가 (`recommend.py`)
+
+```python
+def recommend(api_key, date, errors, timeout=60):
+    for attempt in (1, 2):
+        try:
+            text = call_llm(api_key, build_prompt(date, retry=(attempt == 2)), timeout)
+            return parse_recommendation(text)
+        except urllib.error.HTTPError as exc:
+            errors.append(f"LLM HTTP {exc.code} (시도 {attempt}회차): {_http_hint(exc.code)}")
+            if exc.code in (401, 403):
+                break
+        except urllib.error.URLError as exc:
+            errors.append(f"LLM 네트워크 오류(시도 {attempt}회차): {exc.reason}")
+        except ValueError as exc:
+            errors.append(f"LLM 응답 형식 오류(시도 {attempt}회차): {exc}")
+    return None
+```
+
+**같은 프롬프트로 다시 부르지 않습니다.** 1차 실패는 대개 설명을 덧붙이다 JSON 이 깨진 경우라,
+2회차는 형식만 강조한 짧은 지시로 바꿉니다:
+
+```python
+    if retry:
+        return (
+            f"{date} 여행지 추천. 아래 4개 키만 담은 JSON 하나만 출력하라. 설명·코드펜스 금지.\n"
+            '{"recommended_city": "대표도시", "recommended_cities": ["대표도시", "도시2"], '
+            '"weather": "날씨 요약", "events": ["행사1"], "reason": "추천 근거"}'
+        )
+```
+
+1회로 제한한 이유: 무한 재시도는 쿼터를 태우고 사용자를 기다리게 합니다. 두 번 실패하면
+프롬프트·모델 쪽 문제라 더 돌려도 같은 결과일 가능성이 높습니다.
+
+### 15. 검색 결과가 0건일 때 (`report.py`)
+
+```python
+    for city in cities:
+        found = restaurants.get(city) or []
+        label = f"{city} (대표)" if city == main_city else city
+        lines += [f"### {label}", ""]
+        if found:
+            lines.append("| 이름 | 주소 | 분류 | 링크 |")
+            ...
+        else:
+            lines.append("데이터 없음 (검색 결과가 없거나 API 호출에 실패했습니다)")
+```
+
+**섹션을 지우지 않습니다.** 지워 버리면 읽는 사람은 "검색을 안 한 건지 결과가 없는 건지"
+구분할 수 없습니다. 0건과 호출 실패의 구분은 `errors` 섹션이 담당합니다.
+
+### 16. 캐싱 (보너스 2) (`main.py`)
+
+```python
+def load_cache(date_text):
+    path = os.path.join(config.RESULTS_DIR, f"{date_text}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None  # 캐시가 깨졌으면 없는 셈 치고 새로 호출한다
+```
+
+같은 날짜로 다시 실행하면 API 를 **한 번도** 부르지 않습니다. 캐시 파일이 깨져 있으면 예외를
+올리지 않고 "없는 셈" 치므로, 캐시 때문에 프로그램이 멈추는 일은 없습니다. `--no-cache` 로 무시.
+
+### 17. 검색어 정규화 (`places.py`)
+
+```python
+CITY_ALIASES = {
+    "제주도": "제주시",
+    "울릉도": "울릉군",
+    "여수시": "여수",
+    "강원도 강릉": "강릉",
+}
+
+
+def normalize_city(city):
+    cleaned = " ".join(str(city).split())
+    return CITY_ALIASES.get(cleaned, cleaned)
+```
+
+1단계 LLM 은 "제주도"·"강원도 강릉" 처럼 **사람이 쓰는 표기**를 줍니다. 지도 API 는 행정구역
+표기에 더 잘 맞습니다. 보정을 2단계 입구 한 곳에 두면 프롬프트를 건드리지 않고 검색 품질을
+올릴 수 있고, 대응표만 늘리면 됩니다.
+
+---
+
 ## 준비물 (전제 지식 0)
 
 | 확인 항목 | 없으면 |
