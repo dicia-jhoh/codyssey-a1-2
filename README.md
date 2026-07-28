@@ -600,6 +600,9 @@ def find_restaurants(api_key, city, errors, size=DEFAULT_SIZE, timeout=30):
     )
 ```
 
+같은 프로그램 안에서도 목적이 다르면 방식이 갈립니다. 1단계는 긴 지시문을 보내야 하므로
+POST 로 본문에 담습니다 — URL 길이 제한도 없고, 프롬프트가 접속 기록에 남지도 않습니다.
+
 ```python
 # recommend.py — 긴 프롬프트를 보내야 하므로 POST, 본문은 JSON
     request = urllib.request.Request(
