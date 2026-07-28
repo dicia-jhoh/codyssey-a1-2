@@ -57,7 +57,14 @@ def build_report(date, recommendation, restaurants, errors):
                     f"| {_short_category(place.get('category', ''))} | {link} |"
                 )
         else:
-            lines.append("데이터 없음 (검색 결과가 없거나 API 호출에 실패했습니다)")
+            # 빈 자리를 남기되 **다음 행동**을 함께 준다 — 리포트만 받은 사람도 움직일 수 있어야 한다.
+            lines += [
+                "데이터 없음 (검색 결과가 없거나 API 호출에 실패했습니다)",
+                "",
+                f"- 아래 `errors` 섹션에서 사유를 확인하세요 — 0건이면 `{city}` 대신 인근 시/군이나",
+                "  구·동 단위로 좁혀 다시 실행하고, HTTP 오류면 키·권한을 먼저 고치세요.",
+                "- 이 지역을 뺀 나머지 결과는 그대로 유효합니다.",
+            ]
         lines.append("")
 
     lines += ["## 1일 일정 제안 (지역별)", ""]

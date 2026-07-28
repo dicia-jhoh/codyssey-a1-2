@@ -18,25 +18,63 @@ import urllib.request
 KAKAO_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 DEFAULT_SIZE = 5  # 권장 5곳
 
-# LLM 이 돌려주는 지명 표기 흔들림을 지도 검색이 아는 형태로 맞춘다.
+# ① 표기 흔들림 보정 — LLM 이 주는 사람 표기를 지도 검색이 아는 형태로.
 # 예: "제주도"는 Kakao 키워드 검색에서 결과가 얕고, "제주시"가 잘 걸린다.
 CITY_ALIASES = {
     "제주도": "제주시",
     "울릉도": "울릉군",
     "여수시": "여수",
-    "강원도 강릉": "강릉",
+}
+
+# ② 광역 단위 축소 — "경상북도 맛집" 처럼 넓은 지명은 결과가 흩어져 쓸모가 없다.
+# 그 도(道)의 대표 관광 도시로 내려 검색 품질을 확보한다.
+REGION_TO_CITY = {
+    "강원도": "강릉",
+    "강원특별자치도": "강릉",
+    "경기도": "수원",
+    "충청북도": "청주",
+    "충청남도": "공주",
+    "전라북도": "전주",
+    "전북특별자치도": "전주",
+    "전라남도": "여수",
+    "경상북도": "경주",
+    "경상남도": "통영",
+    "제주특별자치도": "제주시",
+}
+
+# ③ 광역시는 그 자체로 검색되지만 범위가 넓다 — 대표 상권을 붙여 좁힌다.
+METRO_HOTSPOT = {
+    "서울": "서울 종로",
+    "서울특별시": "서울 종로",
+    "부산": "부산 해운대",
+    "대구": "대구 중구",
+    "인천": "인천 중구",
+    "광주": "광주 동구",
+    "대전": "대전 유성구",
+    "울산": "울산 남구",
 }
 
 
 def normalize_city(city):
-    """검색 전 도시명 보정 — 공백 정리 + 별칭 치환.
+    """검색 전 도시명 보정 — 3단계로 좁힌다.
 
-    왜 필요한가: 1단계 LLM 은 "제주도"·"강원도 강릉" 처럼 사람이 쓰는 표기를 준다.
-    지도 API 는 행정구역 단위 표기에 더 잘 맞는다. 보정을 **2단계 입구 한 곳**에 두면
-    LLM 프롬프트를 건드리지 않고도 검색 품질을 올릴 수 있다.
+    왜 2단계 입구 한 곳에 두나: LLM 프롬프트를 건드리지 않고도 검색 품질을 올릴 수 있고,
+    제공자를 바꿔도 이 함수는 그대로 쓰인다. 보정 단계를 나눈 이유는 **왜 바뀌었는지**를
+    설명할 수 있어야 하기 때문이다 — 한 표에 뭉뚱그리면 "제주도→제주시"와
+    "경상북도→경주"가 같은 종류의 보정처럼 보인다(전자는 표기, 후자는 범위다).
     """
     cleaned = " ".join(str(city).split())
-    return CITY_ALIASES.get(cleaned, cleaned)
+    # 광역 단위가 앞에 붙은 형태("강원도 강릉")는 뒤쪽 시/군만 남긴다.
+    parts = cleaned.split()
+    if len(parts) >= 2 and parts[0] in REGION_TO_CITY:
+        cleaned = " ".join(parts[1:])
+    if cleaned in CITY_ALIASES:
+        return CITY_ALIASES[cleaned]
+    if cleaned in REGION_TO_CITY:
+        return REGION_TO_CITY[cleaned]
+    if cleaned in METRO_HOTSPOT:
+        return METRO_HOTSPOT[cleaned]
+    return cleaned
 
 
 def search_places(api_key, city, size=DEFAULT_SIZE, timeout=30):
